@@ -18,7 +18,7 @@ struct ContentView: View {
             Spacer(minLength: 0)
         }
         .padding(22)
-        .frame(minWidth: 560, minHeight: 640)
+        .frame(minWidth: 600, minHeight: 820)
     }
 
     private var header: some View {
@@ -95,8 +95,9 @@ struct ContentView: View {
         return Form {
             if effect.usesColour {
                 Toggle("Rastgele renkler", isOn: $model.lighting.random)
-                ColorPicker("Renk", selection: Binding(get: { model.colour }, set: { model.colour = $0 }), supportsOpacity: false)
+                ColorPanel(red: $model.lighting.red, green: $model.lighting.green, blue: $model.lighting.blue)
                     .disabled(model.lighting.random)
+                    .opacity(model.lighting.random ? 0.4 : 1)
                 HStack {
                     ForEach(Self.swatches, id: \.self) { hex in
                         Button {
@@ -137,7 +138,6 @@ struct ContentView: View {
             Toggle("Mac uyurken ışıkları kapat", isOn: $model.offWhileAsleep)
         }
         .formStyle(.grouped)
-        .scrollDisabled(true)
     }
 
     private static let swatches: [Int] = [0xFFFFFF, 0xFF2D2D, 0xFF8A00, 0xFFD60A, 0x30D158, 0x00C7BE, 0x0A84FF, 0x5E5CE6, 0xBF5AF2, 0xFF375F]

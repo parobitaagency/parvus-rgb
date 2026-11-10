@@ -159,7 +159,8 @@ final class KeyboardModel: ObservableObject {
         guard !loading else { return }
         applyTask?.cancel()
         applyTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(180))
+            // Wait for a pause, so dragging across the colours writes once.
+            try? await Task.sleep(for: .milliseconds(300))
             guard let self, !Task.isCancelled, let keyboard = self.keyboard, !self.asleep else { return }
             await keyboard.apply(self.lighting)
         }
