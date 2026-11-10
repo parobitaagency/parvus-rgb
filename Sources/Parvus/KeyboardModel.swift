@@ -34,6 +34,13 @@ struct Effect: Identifiable, Hashable {
     ]
 }
 
+/// A saved combination of effect, colour, brightness and speed.
+struct Preset: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var name: String
+    var lighting: EVision.Lighting
+}
+
 @MainActor
 final class KeyboardModel: ObservableObject {
     static let shared = KeyboardModel()
@@ -44,6 +51,25 @@ final class KeyboardModel: ObservableObject {
     @Published private(set) var needsPermission = false
     @Published var lighting = EVision.Lighting() { didSet { if lighting != oldValue { scheduleApply() } } }
     @Published var offWhileAsleep: Bool { didSet { UserDefaults.standard.set(offWhileAsleep, forKey: "offWhileAsleep") } }
+    /// The keyboard takes the colour of the album playing in Music or Spotify.
+    @Published var followsMusic: Bool {
+        didSet {
+            UserDefaults.standard.set(followsMusic, forKey: "followsMusic")
+            followsMusic ? music.start() : music.stop()
+        }
+    }
+    /// Lights off between `nightStart` and `nightEnd` (minutes after midnight).
+    @Published var nightMode: Bool { didSet { UserDefaults.standard.set(nightMode, forKey: "nightMode"); checkNight() } }
+    @Published var nightStart: Int { didSet { UserDefaults.standard.set(nightStart, forKey: "nightStart"); checkNight() } }
+    @Published var nightEnd: Int { didSet { UserDefaults.standard.set(nightEnd, forKey: "nightEnd"); checkNight() } }
+    @Published private(set) var isNight = false
+    @Published var presets: [Preset] = [] {
+        didSet { if let data = try? JSONEncoder().encode(presets) { UserDefaults.standard.set(data, forKey: "presets") } }
+    }
+
+    private let music = MusicColor()
+    private var hotkey: Hotkey?
+    private var nightTimer: Timer?
 
     private var manager: IOHIDManager?
     private var keyboard: EVisionKeyboard?
@@ -66,8 +92,17 @@ final class KeyboardModel: ObservableObject {
     }
 
     private init() {
-        UserDefaults.standard.register(defaults: ["offWhileAsleep": true])
-        offWhileAsleep = UserDefaults.standard.bool(forKey: "offWhileAsleep")
+        let defaults = UserDefaults.standard
+        defaults.register(defaults: ["offWhileAsleep": true, "followsMusic": false, "nightMode": false,
+                                     "nightStart": 23 * 60, "nightEnd": 7 * 60])
+        offWhileAsleep = defaults.bool(forKey: "offWhileAsleep")
+        followsMusic = defaults.bool(forKey: "followsMusic")
+        nightMode = defaults.bool(forKey: "nightMode")
+        nightStart = defaults.integer(forKey: "nightStart")
+        nightEnd = defaults.integer(forKey: "nightEnd")
+        if let data = defaults.data(forKey: "presets"), let saved = try? JSONDecoder().decode([Preset].self, from: data) {
+            presets = saved
+        }
         if let data = UserDefaults.standard.data(forKey: "lighting"),
            let saved = try? JSONDecoder().decode(EVision.Lighting.self, from: data) {
             loading = true
@@ -109,6 +144,55 @@ final class KeyboardModel: ObservableObject {
         Log.write("HID manager open: \(String(format: "0x%08x", result))")
         self.manager = manager
         observeSleep()
+        music.onColor = { [weak self] red, green, blue in
+            guard let self, self.followsMusic else { return }
+            self.lighting.random = false
+            self.lighting.red = red
+            self.lighting.green = green
+            self.lighting.blue = blue
+        }
+        if followsMusic { music.start() }
+        hotkey = Hotkey { [weak self] in self?.toggle() }
+        let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkNight() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        nightTimer = timer
+        checkNight()
+    }
+
+    // MARK: Night mode
+
+    private func checkNight() {
+        let now = Calendar.current.dateComponents([.hour, .minute], from: Date())
+        let minute = (now.hour ?? 0) * 60 + (now.minute ?? 0)
+        let night: Bool
+        if !nightMode || nightStart == nightEnd {
+            night = false
+        } else if nightStart < nightEnd {
+            night = minute >= nightStart && minute < nightEnd
+        } else {
+            night = minute >= nightStart || minute < nightEnd
+        }
+        guard night != isNight else { return }
+        isNight = night
+        Log.write(night ? "night mode: lights off" : "night mode: lights back")
+        pushEffective()
+    }
+
+    // MARK: Presets
+
+    func savePreset(named name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        presets.append(Preset(name: trimmed.isEmpty ? "Ayar \(presets.count + 1)" : trimmed, lighting: lighting))
+    }
+
+    func load(_ preset: Preset) { lighting = preset.lighting }
+
+    func delete(_ preset: Preset) { presets.removeAll { $0.id == preset.id } }
+
+    func toggle() {
+        lighting.brightness == 0 ? turnOn() : turnOff()
     }
 
     func retryPermission() {
@@ -161,9 +245,22 @@ final class KeyboardModel: ObservableObject {
         applyTask = Task { [weak self] in
             // Wait for a pause, so dragging across the colours writes once.
             try? await Task.sleep(for: .milliseconds(300))
-            guard let self, !Task.isCancelled, let keyboard = self.keyboard, !self.asleep else { return }
-            await keyboard.apply(self.lighting)
+            guard let self, !Task.isCancelled, let keyboard = self.keyboard else { return }
+            await keyboard.apply(self.effective)
         }
+    }
+
+    /// What the keyboard should show now: dark while the Mac sleeps or at night.
+    private var effective: EVision.Lighting {
+        var shown = lighting
+        if asleep || isNight { shown.brightness = 0 }
+        return shown
+    }
+
+    private func pushEffective() {
+        guard let keyboard else { return }
+        let shown = effective
+        Task { await keyboard.apply(shown) }
     }
 
     private func save() {
@@ -195,19 +292,16 @@ final class KeyboardModel: ObservableObject {
     }
 
     private func sleep() {
-        guard offWhileAsleep, !asleep, let keyboard else { return }
+        guard offWhileAsleep, !asleep else { return }
         asleep = true
-        var dark = lighting
-        dark.brightness = 0
-        Task { await keyboard.apply(dark) }
+        pushEffective()
     }
 
     private func wake() {
         guard asleep else { return }
         asleep = false
-        guard let keyboard else { return }
-        let lighting = self.lighting
-        Task { await keyboard.apply(lighting) }
+        checkNight()
+        pushEffective()
     }
 }
 

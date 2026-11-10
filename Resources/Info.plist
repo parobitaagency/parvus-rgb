@@ -13,5 +13,7 @@
 	<key>LSMinimumSystemVersion</key><string>14.0</string>
 	<key>LSUIElement</key><true/>
 	<key>NSHighResolutionCapable</key><true/>
+	<key>CFBundleIconFile</key><string>AppIcon</string>
+	<key>NSAppleEventsUsageDescription</key><string>Parvus reads the album artwork playing in Music or Spotify to colour the keyboard.</string>
 </dict>
 </plist>

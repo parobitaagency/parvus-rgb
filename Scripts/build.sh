@@ -8,6 +8,7 @@ APP="build/Parvus.app"
 rm -rf "$APP" dist && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" dist
 cp "$BIN/Parvus" "$APP/Contents/MacOS/Parvus"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 echo -n "APPL????" > "$APP/Contents/PkgInfo"
 codesign --force --sign - --identifier com.parobita.parvus "$APP"
 codesign --verify --strict --verbose=2 "$APP"
