@@ -5,7 +5,7 @@ import ScreenCaptureKit
 
 /// The colour on the monitor, for lighting that follows the screen.
 ///
-/// ScreenCaptureKit hands over a tiny (60×20) copy of the display about 20
+/// ScreenCaptureKit hands over a tiny (80 pixels wide) copy of the display about 20
 /// times a second; each frame is boiled down to a grid of `columns` × `rows`
 /// colours, one per keyboard area. The external
 /// monitor is used when one is connected, otherwise the main display.
@@ -35,8 +35,11 @@ final class ScreenColor: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked 
                     return
                 }
                 let config = SCStreamConfiguration()
-                config.width = Self.columns * 4
-                config.height = Self.rows * 4
+                // Same shape as the display: a frame of another shape gets
+                // black bars at the sides, which went dark on the keys.
+                config.width = 80
+                config.height = max(Self.rows * 2, Int((80 * Double(display.height) / Double(max(display.width, 1))).rounded()))
+                config.preservesAspectRatio = false
                 config.minimumFrameInterval = CMTime(value: 1, timescale: 20)
                 config.pixelFormat = kCVPixelFormatType_32BGRA
                 config.showsCursor = false
