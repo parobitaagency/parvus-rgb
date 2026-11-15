@@ -88,6 +88,11 @@ final class KeyboardModel: ObservableObject {
     private var screenTarget: [Double]?
     private var screenShown: [Double]?
     private var screenSent: [UInt8]?
+    private var screenSentAt = Date.distantPast
+    private var screenFailures = 0
+    /// Last time a key was pressed on the Parvus; live colours pause while typing.
+    private var lastKeyPress = Date.distantPast
+    private var keyManager: IOHIDManager?
     /// Until this time the keys show the zone test pattern.
     private var testUntil: Date?
     private var testTask: Task<Void, Never>?
@@ -169,6 +174,7 @@ final class KeyboardModel: ObservableObject {
         Log.write("HID manager open: \(String(format: "0x%08x", result))")
         self.manager = manager
         observeSleep()
+        watchKeys()
         music.onColor = { [weak self] red, green, blue in
             guard let self, self.followsMusic else { return }
             self.lighting.random = false
@@ -309,10 +315,13 @@ final class KeyboardModel: ObservableObject {
             guard screenTask == nil else { return }
             screenShown = nil
             screenSent = nil
+            screenFailures = 0
             screenTask = Task { [weak self] in
                 while !Task.isCancelled {
                     await self?.sendScreenFrame()
-                    try? await Task.sleep(for: .milliseconds(40))
+                    // 10 updates a second at most: faster floods the keyboard,
+                    // which then misreads keys.
+                    try? await Task.sleep(for: .milliseconds(100))
                 }
             }
         } else {
@@ -347,9 +356,50 @@ final class KeyboardModel: ObservableObject {
             let cell = (row * ScreenColor.columns + column) * 3
             return (shown[cell], shown[cell + 1], shown[cell + 2])
         }
-        guard slots != screenSent else { return }
-        screenSent = slots
-        await keyboard.showLive(slots)
+        // Hold off while typing, so colour packets never cross key presses.
+        guard Date().timeIntervalSince(lastKeyPress) > 0.6 else { return }
+        // Unchanged: only a full refresh every 2 s, so the keyboard keeps
+        // the live colours instead of falling back to its effect.
+        let refresh = Date().timeIntervalSince(screenSentAt) > 2
+        guard slots != screenSent || refresh else { return }
+        let ok = await keyboard.sendLive(slots, changedSince: refresh ? nil : screenSent)
+        if ok {
+            screenSent = slots
+            screenSentAt = Date()
+            screenFailures = 0
+        } else {
+            screenSent = nil
+            screenFailures += 1
+            Log.write("screen sync: keyboard did not answer (\(screenFailures))")
+            if screenFailures >= 3 {
+                screenError = "Klavye yanıt vermedi, senkron durduruldu. Klavyeyi çıkarıp tak."
+                followsScreen = false
+                return
+            }
+            try? await Task.sleep(for: .seconds(2))
+        }
+    }
+
+    /// Watches the Parvus's own keys (Input Monitoring is already granted
+    /// for the lighting interface) to know when the user is typing.
+    private func watchKeys() {
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        let matching: [String: Any] = [
+            kIOHIDVendorIDKey: EVision.vendorID,
+            kIOHIDProductIDKey: EVision.productID,
+            kIOHIDDeviceUsagePageKey: kHIDPage_GenericDesktop,
+            kIOHIDDeviceUsageKey: kHIDUsage_GD_Keyboard,
+        ]
+        IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDManagerRegisterInputValueCallback(manager, { context, _, _, _ in
+            guard let context else { return }
+            let model = Unmanaged<KeyboardModel>.fromOpaque(context).takeUnretainedValue()
+            MainActor.assumeIsolated { model.lastKeyPress = Date() }
+        }, context)
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+        IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        keyManager = manager
     }
 
     /// Builds the dynamic map: for every slot, the colour of the screen area

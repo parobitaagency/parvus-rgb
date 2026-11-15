@@ -232,12 +232,24 @@ final class EVisionKeyboard {
     /// column by column, 6 per column from the top row (as in OpenRGB's
     /// EVision v2 map), so slot / 6 is the key's column, slot % 6 its row.
     func showLive(_ colours: [UInt8]) async {
-        guard version == .v2, mapSize > 0, colours.count == mapSize * 3 else { return }
+        _ = await sendLive(colours, changedSince: nil)
+    }
+
+    /// Sends only the 56-byte chunks that differ from `previous` (all of
+    /// them when it is nil). False if the keyboard stopped answering.
+    func sendLive(_ colours: [UInt8], changedSince previous: [UInt8]?) async -> Bool {
+        guard version == .v2, mapSize > 0, colours.count == mapSize * 3 else { return true }
+        let previous = previous?.count == colours.count ? previous : nil
         var offset = 0
         while offset < colours.count {
-            let chunk = Array(colours[offset..<min(offset + EVision.maxPayload, colours.count)])
-            await query(EVision.Command.dynamicColors.rawValue, offset: offset, size: chunk.count, payload: chunk)
-            offset += chunk.count
+            let end = min(offset + EVision.maxPayload, colours.count)
+            let chunk = Array(colours[offset..<end])
+            if previous == nil || Array(previous![offset..<end]) != chunk {
+                let answer = await query(EVision.Command.dynamicColors.rawValue, offset: offset, size: chunk.count, payload: chunk)
+                if answer == nil { return false }
+            }
+            offset = end
         }
+        return true
     }
 }
