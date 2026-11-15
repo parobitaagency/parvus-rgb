@@ -154,6 +154,14 @@ struct ContentView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                Toggle(isOn: $model.followsScreen) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Ekranla senkron")
+                        Text(screenCaption)
+                            .font(.caption).foregroundStyle(model.screenError == nil ? Color.secondary : Color.orange)
+                    }
+                }
+                .disabled(!model.supportsLive)
                 Toggle("Mac uyurken ışıkları kapat", isOn: $model.offWhileAsleep)
                 Toggle(isOn: $model.nightMode) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -194,6 +202,12 @@ struct ContentView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private var screenCaption: String {
+        if let error = model.screenError { return error }
+        if !model.supportsLive { return "Bu klavyenin yazılımı canlı renk desteklemiyor (EVision v1)." }
+        return "Klavye, monitördeki görüntünün rengini canlı olarak alır. İlk açılışta Ekran Kaydı izni ister."
     }
 
     private func savePreset() {

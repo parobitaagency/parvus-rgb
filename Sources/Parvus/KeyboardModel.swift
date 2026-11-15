@@ -56,8 +56,24 @@ final class KeyboardModel: ObservableObject {
         didSet {
             UserDefaults.standard.set(followsMusic, forKey: "followsMusic")
             followsMusic ? music.start() : music.stop()
+            if followsMusic { followsScreen = false }
         }
     }
+    /// The keyboard follows the colours on the monitor, live (v2 firmware).
+    @Published var followsScreen: Bool {
+        didSet {
+            guard followsScreen != oldValue else { return }
+            UserDefaults.standard.set(followsScreen, forKey: "followsScreen")
+            if followsScreen {
+                followsMusic = false
+                screenError = nil
+            }
+            updateScreenSync()
+        }
+    }
+    @Published private(set) var screenError: String?
+    /// Live colours need EVision v2; v1 keyboards would have to save every frame.
+    var supportsLive: Bool { keyboard?.supportsLive ?? false }
     /// Lights off between `nightStart` and `nightEnd` (minutes after midnight).
     @Published var nightMode: Bool { didSet { UserDefaults.standard.set(nightMode, forKey: "nightMode"); checkNight() } }
     @Published var nightStart: Int { didSet { UserDefaults.standard.set(nightStart, forKey: "nightStart"); checkNight() } }
@@ -68,6 +84,10 @@ final class KeyboardModel: ObservableObject {
     }
 
     private let music = MusicColor()
+    private let screen = ScreenColor()
+    private var screenTarget: (Double, Double, Double)?
+    private var screenShown: (Double, Double, Double)?
+    private var screenTask: Task<Void, Never>?
     private var hotkey: Hotkey?
     private var nightTimer: Timer?
 
@@ -93,10 +113,11 @@ final class KeyboardModel: ObservableObject {
 
     private init() {
         let defaults = UserDefaults.standard
-        defaults.register(defaults: ["offWhileAsleep": true, "followsMusic": false, "nightMode": false,
+        defaults.register(defaults: ["offWhileAsleep": true, "followsMusic": false, "followsScreen": false, "nightMode": false,
                                      "nightStart": 23 * 60, "nightEnd": 7 * 60])
         offWhileAsleep = defaults.bool(forKey: "offWhileAsleep")
         followsMusic = defaults.bool(forKey: "followsMusic")
+        followsScreen = defaults.bool(forKey: "followsScreen")
         nightMode = defaults.bool(forKey: "nightMode")
         nightStart = defaults.integer(forKey: "nightStart")
         nightEnd = defaults.integer(forKey: "nightEnd")
@@ -152,6 +173,12 @@ final class KeyboardModel: ObservableObject {
             self.lighting.blue = blue
         }
         if followsMusic { music.start() }
+        screen.onColor = { [weak self] red, green, blue in self?.screenTarget = (red, green, blue) }
+        screen.onError = { [weak self] message in
+            guard let self else { return }
+            self.screenError = message
+            self.followsScreen = false
+        }
         hotkey = Hotkey { [weak self] in self?.toggle() }
         let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.checkNight() }
@@ -178,6 +205,7 @@ final class KeyboardModel: ObservableObject {
         isNight = night
         Log.write(night ? "night mode: lights off" : "night mode: lights back")
         pushEffective()
+        updateScreenSync()
     }
 
     // MARK: Presets
@@ -224,6 +252,8 @@ final class KeyboardModel: ObservableObject {
                 loading = false
                 save()
             }
+            objectWillChange.send()
+            updateScreenSync()
         }
     }
 
@@ -234,6 +264,7 @@ final class KeyboardModel: ObservableObject {
         connected = false
         versionName = ""
         status = "Klavye takılı değil"
+        updateScreenSync()
     }
 
     // MARK: Applying
@@ -261,6 +292,55 @@ final class KeyboardModel: ObservableObject {
         guard let keyboard else { return }
         let shown = effective
         Task { await keyboard.apply(shown) }
+    }
+
+    // MARK: Screen sync
+
+    /// Runs the capture and the send loop only while they can do something:
+    /// sync on, a v2 keyboard attached, the Mac awake and not night.
+    private func updateScreenSync() {
+        let active = followsScreen && supportsLive && !asleep && !isNight
+        if active {
+            screen.start()
+            guard screenTask == nil else { return }
+            screenShown = nil
+            screenTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    await self?.sendScreenFrame()
+                    try? await Task.sleep(for: .milliseconds(40))
+                }
+            }
+        } else {
+            screen.stop()
+            guard let task = screenTask else { return }
+            task.cancel()
+            screenTask = nil
+            screenTarget = nil
+            screenShown = nil
+            // Back to the saved effect.
+            pushEffective()
+        }
+    }
+
+    /// Eases the keys toward the latest screen colour, so cuts in a video do
+    /// not flicker, and sends only when the change is visible.
+    private func sendScreenFrame() async {
+        guard let keyboard, let target = screenTarget else { return }
+        // Lights switched off (button or ⌃⌥⌘L): leave them off.
+        guard lighting.brightness > 0 else {
+            screenShown = nil
+            return
+        }
+        let shown = screenShown ?? target
+        let ease = 0.35
+        let next = (shown.0 + (target.0 - shown.0) * ease,
+                    shown.1 + (target.1 - shown.1) * ease,
+                    shown.2 + (target.2 - shown.2) * ease)
+        func byte(_ value: Double) -> UInt8 { UInt8((min(max(value, 0), 1) * 255).rounded()) }
+        if let old = screenShown,
+           byte(old.0) == byte(next.0), byte(old.1) == byte(next.1), byte(old.2) == byte(next.2) { return }
+        screenShown = next
+        await keyboard.showLive(red: byte(next.0), green: byte(next.1), blue: byte(next.2))
     }
 
     private func save() {
@@ -294,6 +374,7 @@ final class KeyboardModel: ObservableObject {
     private func sleep() {
         guard offWhileAsleep, !asleep else { return }
         asleep = true
+        updateScreenSync()
         pushEffective()
     }
 
@@ -302,6 +383,7 @@ final class KeyboardModel: ObservableObject {
         asleep = false
         checkNight()
         pushEffective()
+        updateScreenSync()
     }
 }
 

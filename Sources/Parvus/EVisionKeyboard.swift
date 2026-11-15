@@ -216,6 +216,8 @@ final class EVisionKeyboard {
 
     // MARK: Live colour (v2)
 
+    var supportsLive: Bool { version == .v2 && mapSize > 0 }
+
     /// Sets every key to one colour without saving anything to the
     /// keyboard. The keyboard returns to its saved effect when updates stop.
     func showLive(red: UInt8, green: UInt8, blue: UInt8) async {
