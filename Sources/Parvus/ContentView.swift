@@ -154,6 +154,7 @@ struct ContentView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                if KeyboardModel.liveColoursEnabled {
                 Toggle(isOn: $model.followsScreen) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Ekranla senkron")
@@ -172,6 +173,7 @@ struct ContentView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
+                }
                 }
                 Toggle("Mac uyurken ışıkları kapat", isOn: $model.offWhileAsleep)
                 Toggle(isOn: $model.nightMode) {

@@ -73,7 +73,12 @@ final class KeyboardModel: ObservableObject {
     }
     @Published private(set) var screenError: String?
     /// Live colours need EVision v2; v1 keyboards would have to save every frame.
-    var supportsLive: Bool { keyboard?.supportsLive ?? false }
+    /// Off for now: on the Parvus, streaming live colours corrupts the
+    /// keyboard's state until it is unplugged; a key then sends System Power
+    /// (loginwindow logs "received system power related system event"
+    /// about 12 times a second) and some keys stop typing.
+    static let liveColoursEnabled = false
+    var supportsLive: Bool { Self.liveColoursEnabled && (keyboard?.supportsLive ?? false) }
     /// Lights off between `nightStart` and `nightEnd` (minutes after midnight).
     @Published var nightMode: Bool { didSet { UserDefaults.standard.set(nightMode, forKey: "nightMode"); checkNight() } }
     @Published var nightStart: Int { didSet { UserDefaults.standard.set(nightStart, forKey: "nightStart"); checkNight() } }
@@ -126,7 +131,7 @@ final class KeyboardModel: ObservableObject {
                                      "nightStart": 23 * 60, "nightEnd": 7 * 60])
         offWhileAsleep = defaults.bool(forKey: "offWhileAsleep")
         followsMusic = defaults.bool(forKey: "followsMusic")
-        followsScreen = defaults.bool(forKey: "followsScreen")
+        followsScreen = Self.liveColoursEnabled && defaults.bool(forKey: "followsScreen")
         nightMode = defaults.bool(forKey: "nightMode")
         nightStart = defaults.integer(forKey: "nightStart")
         nightEnd = defaults.integer(forKey: "nightEnd")
