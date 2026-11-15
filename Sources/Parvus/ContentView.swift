@@ -162,6 +162,17 @@ struct ContentView: View {
                     }
                 }
                 .disabled(!model.supportsLive)
+                if model.supportsLive {
+                    LabeledContent {
+                        Button("Bölge testi") { model.runZoneTest() }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Tuş haritası")
+                            Text("5 saniye boyunca sol yarı kırmızı, sağ yarı mavi, üst sıra beyaz olmalı.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 Toggle("Mac uyurken ışıkları kapat", isOn: $model.offWhileAsleep)
                 Toggle(isOn: $model.nightMode) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -207,7 +218,7 @@ struct ContentView: View {
     private var screenCaption: String {
         if let error = model.screenError { return error }
         if !model.supportsLive { return "Bu klavyenin yazılımı canlı renk desteklemiyor (EVision v1)." }
-        return "Klavye, monitördeki görüntünün rengini canlı olarak alır. İlk açılışta Ekran Kaydı izni ister."
+        return "Her tuş, monitörde kendi hizasındaki bölgenin rengini canlı olarak alır. En parlak sonuç için klavye parlaklığını en yükseğe al. İlk açılışta Ekran Kaydı izni ister."
     }
 
     private func savePreset() {

@@ -225,6 +225,14 @@ final class EVisionKeyboard {
         var colours = [UInt8]()
         colours.reserveCapacity(mapSize * 3)
         for _ in 0..<mapSize { colours += [red, green, blue] }
+        await showLive(colours)
+    }
+
+    /// A colour per slot of the dynamic map (r, g, b per slot). Slots run
+    /// column by column, 6 per column from the top row (as in OpenRGB's
+    /// EVision v2 map), so slot / 6 is the key's column, slot % 6 its row.
+    func showLive(_ colours: [UInt8]) async {
+        guard version == .v2, mapSize > 0, colours.count == mapSize * 3 else { return }
         var offset = 0
         while offset < colours.count {
             let chunk = Array(colours[offset..<min(offset + EVision.maxPayload, colours.count)])

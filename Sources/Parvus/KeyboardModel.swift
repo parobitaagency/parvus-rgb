@@ -85,8 +85,12 @@ final class KeyboardModel: ObservableObject {
 
     private let music = MusicColor()
     private let screen = ScreenColor()
-    private var screenTarget: (Double, Double, Double)?
-    private var screenShown: (Double, Double, Double)?
+    private var screenTarget: [Double]?
+    private var screenShown: [Double]?
+    private var screenSent: [UInt8]?
+    /// Until this time the keys show the zone test pattern.
+    private var testUntil: Date?
+    private var testTask: Task<Void, Never>?
     private var screenTask: Task<Void, Never>?
     private var hotkey: Hotkey?
     private var nightTimer: Timer?
@@ -173,7 +177,7 @@ final class KeyboardModel: ObservableObject {
             self.lighting.blue = blue
         }
         if followsMusic { music.start() }
-        screen.onColor = { [weak self] red, green, blue in self?.screenTarget = (red, green, blue) }
+        screen.onColors = { [weak self] grid in self?.screenTarget = grid }
         screen.onError = { [weak self] message in
             guard let self else { return }
             self.screenError = message
@@ -304,6 +308,7 @@ final class KeyboardModel: ObservableObject {
             screen.start()
             guard screenTask == nil else { return }
             screenShown = nil
+            screenSent = nil
             screenTask = Task { [weak self] in
                 while !Task.isCancelled {
                     await self?.sendScreenFrame()
@@ -317,30 +322,77 @@ final class KeyboardModel: ObservableObject {
             screenTask = nil
             screenTarget = nil
             screenShown = nil
+            screenSent = nil
             // Back to the saved effect.
             pushEffective()
         }
     }
 
-    /// Eases the keys toward the latest screen colour, so cuts in a video do
-    /// not flicker, and sends only when the change is visible.
+    /// Eases the keys toward the latest screen colours, so cuts in a video
+    /// do not flicker, and sends only when something visibly changed.
     private func sendScreenFrame() async {
         guard let keyboard, let target = screenTarget else { return }
+        if let testUntil, testUntil > Date() { return }
         // Lights switched off (button or ⌃⌥⌘L): leave them off.
         guard lighting.brightness > 0 else {
             screenShown = nil
+            screenSent = nil
             return
         }
-        let shown = screenShown ?? target
-        let ease = 0.35
-        let next = (shown.0 + (target.0 - shown.0) * ease,
-                    shown.1 + (target.1 - shown.1) * ease,
-                    shown.2 + (target.2 - shown.2) * ease)
+        var shown = screenShown ?? target
+        if shown.count != target.count { shown = target }
+        for index in shown.indices { shown[index] += (target[index] - shown[index]) * 0.35 }
+        screenShown = shown
+        let slots = Self.slots(keyboard.mapSize) { column, row in
+            let cell = (row * ScreenColor.columns + column) * 3
+            return (shown[cell], shown[cell + 1], shown[cell + 2])
+        }
+        guard slots != screenSent else { return }
+        screenSent = slots
+        await keyboard.showLive(slots)
+    }
+
+    /// Builds the dynamic map: for every slot, the colour of the screen area
+    /// above that key. Slot / 6 is the key column, slot % 6 its row; the
+    /// Parvus is a 60% board, so its keys use the first 15 columns.
+    private static func slots(_ mapSize: Int, colour: (Int, Int) -> (Double, Double, Double)) -> [UInt8] {
         func byte(_ value: Double) -> UInt8 { UInt8((min(max(value, 0), 1) * 255).rounded()) }
-        if let old = screenShown,
-           byte(old.0) == byte(next.0), byte(old.1) == byte(next.1), byte(old.2) == byte(next.2) { return }
-        screenShown = next
-        await keyboard.showLive(red: byte(next.0), green: byte(next.1), blue: byte(next.2))
+        var bytes = [UInt8](repeating: 0, count: mapSize * 3)
+        for slot in 0..<mapSize {
+            let column = min(slot / 6, ScreenColor.columns - 1)
+            // Six map rows onto the five screen rows.
+            let row = min(Int((Double(slot % 6) * Double(ScreenColor.rows - 1) / 5).rounded()), ScreenColor.rows - 1)
+            let (r, g, b) = colour(column, row)
+            bytes[slot * 3] = byte(r)
+            bytes[slot * 3 + 1] = byte(g)
+            bytes[slot * 3 + 2] = byte(b)
+        }
+        return bytes
+    }
+
+    /// Five seconds of a fixed pattern to check the key map: left half red,
+    /// right half blue, top row white.
+    func runZoneTest() {
+        guard let keyboard, keyboard.supportsLive else { return }
+        testTask?.cancel()
+        testUntil = Date().addingTimeInterval(5)
+        screenSent = nil
+        let slots = Self.slots(keyboard.mapSize) { column, row in
+            if row == 0 { return (1, 1, 1) }
+            return column < ScreenColor.columns / 2 ? (1, 0, 0) : (0, 0.3, 1)
+        }
+        Log.write("zone test: map size \(keyboard.mapSize)")
+        testTask = Task { [weak self] in
+            // The keyboard drops live colours when they stop coming, so repeat.
+            for _ in 0..<25 {
+                guard !Task.isCancelled else { return }
+                await keyboard.showLive(slots)
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.testUntil = nil
+            if self.screenTask == nil { self.pushEffective() }
+        }
     }
 
     private func save() {
