@@ -73,7 +73,7 @@ struct ColorPanel: View {
                                             set: { value.wrappedValue = UInt8(min(max($0, 0), 255)) }),
                       format: .number)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 50)
+                .frame(width: 58)
                 .multilineTextAlignment(.trailing)
         }
     }

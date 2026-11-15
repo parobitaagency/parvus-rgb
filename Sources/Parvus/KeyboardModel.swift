@@ -56,29 +56,8 @@ final class KeyboardModel: ObservableObject {
         didSet {
             UserDefaults.standard.set(followsMusic, forKey: "followsMusic")
             followsMusic ? music.start() : music.stop()
-            if followsMusic { followsScreen = false }
         }
     }
-    /// The keyboard follows the colours on the monitor, live (v2 firmware).
-    @Published var followsScreen: Bool {
-        didSet {
-            guard followsScreen != oldValue else { return }
-            UserDefaults.standard.set(followsScreen, forKey: "followsScreen")
-            if followsScreen {
-                followsMusic = false
-                screenError = nil
-            }
-            updateScreenSync()
-        }
-    }
-    @Published private(set) var screenError: String?
-    /// Live colours need EVision v2; v1 keyboards would have to save every frame.
-    /// Off for now: on the Parvus, streaming live colours corrupts the
-    /// keyboard's state until it is unplugged; a key then sends System Power
-    /// (loginwindow logs "received system power related system event"
-    /// about 12 times a second) and some keys stop typing.
-    static let liveColoursEnabled = false
-    var supportsLive: Bool { Self.liveColoursEnabled && (keyboard?.supportsLive ?? false) }
     /// Lights off between `nightStart` and `nightEnd` (minutes after midnight).
     @Published var nightMode: Bool { didSet { UserDefaults.standard.set(nightMode, forKey: "nightMode"); checkNight() } }
     @Published var nightStart: Int { didSet { UserDefaults.standard.set(nightStart, forKey: "nightStart"); checkNight() } }
@@ -88,20 +67,12 @@ final class KeyboardModel: ObservableObject {
         didSet { if let data = try? JSONEncoder().encode(presets) { UserDefaults.standard.set(data, forKey: "presets") } }
     }
 
+    /// The user's own saved colours (0xRRGGBB), shown next to the built-in swatches.
+    @Published var customColours: [Int] = [] {
+        didSet { UserDefaults.standard.set(customColours, forKey: "customColours") }
+    }
+
     private let music = MusicColor()
-    private let screen = ScreenColor()
-    private var screenTarget: [Double]?
-    private var screenShown: [Double]?
-    private var screenSent: [UInt8]?
-    private var screenSentAt = Date.distantPast
-    private var screenFailures = 0
-    /// Last time a key was pressed on the Parvus; live colours pause while typing.
-    private var lastKeyPress = Date.distantPast
-    private var keyManager: IOHIDManager?
-    /// Until this time the keys show the zone test pattern.
-    private var testUntil: Date?
-    private var testTask: Task<Void, Never>?
-    private var screenTask: Task<Void, Never>?
     private var hotkey: Hotkey?
     private var nightTimer: Timer?
 
@@ -127,14 +98,14 @@ final class KeyboardModel: ObservableObject {
 
     private init() {
         let defaults = UserDefaults.standard
-        defaults.register(defaults: ["offWhileAsleep": true, "followsMusic": false, "followsScreen": false, "nightMode": false,
+        defaults.register(defaults: ["offWhileAsleep": true, "followsMusic": false, "nightMode": false,
                                      "nightStart": 23 * 60, "nightEnd": 7 * 60])
         offWhileAsleep = defaults.bool(forKey: "offWhileAsleep")
         followsMusic = defaults.bool(forKey: "followsMusic")
-        followsScreen = Self.liveColoursEnabled && defaults.bool(forKey: "followsScreen")
         nightMode = defaults.bool(forKey: "nightMode")
         nightStart = defaults.integer(forKey: "nightStart")
         nightEnd = defaults.integer(forKey: "nightEnd")
+        customColours = defaults.array(forKey: "customColours") as? [Int] ?? []
         if let data = defaults.data(forKey: "presets"), let saved = try? JSONDecoder().decode([Preset].self, from: data) {
             presets = saved
         }
@@ -179,7 +150,6 @@ final class KeyboardModel: ObservableObject {
         Log.write("HID manager open: \(String(format: "0x%08x", result))")
         self.manager = manager
         observeSleep()
-        watchKeys()
         music.onColor = { [weak self] red, green, blue in
             guard let self, self.followsMusic else { return }
             self.lighting.random = false
@@ -188,12 +158,6 @@ final class KeyboardModel: ObservableObject {
             self.lighting.blue = blue
         }
         if followsMusic { music.start() }
-        screen.onColors = { [weak self] grid in self?.screenTarget = grid }
-        screen.onError = { [weak self] message in
-            guard let self else { return }
-            self.screenError = message
-            self.followsScreen = false
-        }
         hotkey = Hotkey { [weak self] in self?.toggle() }
         let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.checkNight() }
@@ -220,7 +184,6 @@ final class KeyboardModel: ObservableObject {
         isNight = night
         Log.write(night ? "night mode: lights off" : "night mode: lights back")
         pushEffective()
-        updateScreenSync()
     }
 
     // MARK: Presets
@@ -231,6 +194,27 @@ final class KeyboardModel: ObservableObject {
     }
 
     func load(_ preset: Preset) { lighting = preset.lighting }
+
+    // MARK: Custom colours
+
+    var currentHex: Int { Int(lighting.red) << 16 | Int(lighting.green) << 8 | Int(lighting.blue) }
+
+    /// Saves the colour now on the keyboard; an existing one moves to the end.
+    func saveCurrentColour() {
+        let hex = currentHex
+        customColours.removeAll { $0 == hex }
+        customColours.append(hex)
+        if customColours.count > 12 { customColours.removeFirst(customColours.count - 12) }
+    }
+
+    func deleteColour(_ hex: Int) { customColours.removeAll { $0 == hex } }
+
+    func useColour(_ hex: Int) {
+        lighting.random = false
+        lighting.red = UInt8((hex >> 16) & 0xFF)
+        lighting.green = UInt8((hex >> 8) & 0xFF)
+        lighting.blue = UInt8(hex & 0xFF)
+    }
 
     func delete(_ preset: Preset) { presets.removeAll { $0.id == preset.id } }
 
@@ -267,8 +251,6 @@ final class KeyboardModel: ObservableObject {
                 loading = false
                 save()
             }
-            objectWillChange.send()
-            updateScreenSync()
         }
     }
 
@@ -279,7 +261,6 @@ final class KeyboardModel: ObservableObject {
         connected = false
         versionName = ""
         status = "Klavye takılı değil"
-        updateScreenSync()
     }
 
     // MARK: Applying
@@ -307,147 +288,6 @@ final class KeyboardModel: ObservableObject {
         guard let keyboard else { return }
         let shown = effective
         Task { await keyboard.apply(shown) }
-    }
-
-    // MARK: Screen sync
-
-    /// Runs the capture and the send loop only while they can do something:
-    /// sync on, a v2 keyboard attached, the Mac awake and not night.
-    private func updateScreenSync() {
-        let active = followsScreen && supportsLive && !asleep && !isNight
-        if active {
-            screen.start()
-            guard screenTask == nil else { return }
-            screenShown = nil
-            screenSent = nil
-            screenFailures = 0
-            screenTask = Task { [weak self] in
-                while !Task.isCancelled {
-                    await self?.sendScreenFrame()
-                    // 10 updates a second at most: faster floods the keyboard,
-                    // which then misreads keys.
-                    try? await Task.sleep(for: .milliseconds(100))
-                }
-            }
-        } else {
-            screen.stop()
-            guard let task = screenTask else { return }
-            task.cancel()
-            screenTask = nil
-            screenTarget = nil
-            screenShown = nil
-            screenSent = nil
-            // Back to the saved effect.
-            pushEffective()
-        }
-    }
-
-    /// Eases the keys toward the latest screen colours, so cuts in a video
-    /// do not flicker, and sends only when something visibly changed.
-    private func sendScreenFrame() async {
-        guard let keyboard, let target = screenTarget else { return }
-        if let testUntil, testUntil > Date() { return }
-        // Lights switched off (button or ⌃⌥⌘L): leave them off.
-        guard lighting.brightness > 0 else {
-            screenShown = nil
-            screenSent = nil
-            return
-        }
-        var shown = screenShown ?? target
-        if shown.count != target.count { shown = target }
-        for index in shown.indices { shown[index] += (target[index] - shown[index]) * 0.35 }
-        screenShown = shown
-        let slots = Self.slots(keyboard.mapSize) { column, row in
-            let cell = (row * ScreenColor.columns + column) * 3
-            return (shown[cell], shown[cell + 1], shown[cell + 2])
-        }
-        // Hold off while typing, so colour packets never cross key presses.
-        guard Date().timeIntervalSince(lastKeyPress) > 0.6 else { return }
-        // Unchanged: only a full refresh every 2 s, so the keyboard keeps
-        // the live colours instead of falling back to its effect.
-        let refresh = Date().timeIntervalSince(screenSentAt) > 2
-        guard slots != screenSent || refresh else { return }
-        let ok = await keyboard.sendLive(slots, changedSince: refresh ? nil : screenSent)
-        if ok {
-            screenSent = slots
-            screenSentAt = Date()
-            screenFailures = 0
-        } else {
-            screenSent = nil
-            screenFailures += 1
-            Log.write("screen sync: keyboard did not answer (\(screenFailures))")
-            if screenFailures >= 3 {
-                screenError = "Klavye yanıt vermedi, senkron durduruldu. Klavyeyi çıkarıp tak."
-                followsScreen = false
-                return
-            }
-            try? await Task.sleep(for: .seconds(2))
-        }
-    }
-
-    /// Watches the Parvus's own keys (Input Monitoring is already granted
-    /// for the lighting interface) to know when the user is typing.
-    private func watchKeys() {
-        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        let matching: [String: Any] = [
-            kIOHIDVendorIDKey: EVision.vendorID,
-            kIOHIDProductIDKey: EVision.productID,
-            kIOHIDDeviceUsagePageKey: kHIDPage_GenericDesktop,
-            kIOHIDDeviceUsageKey: kHIDUsage_GD_Keyboard,
-        ]
-        IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
-        let context = Unmanaged.passUnretained(self).toOpaque()
-        IOHIDManagerRegisterInputValueCallback(manager, { context, _, _, _ in
-            guard let context else { return }
-            let model = Unmanaged<KeyboardModel>.fromOpaque(context).takeUnretainedValue()
-            MainActor.assumeIsolated { model.lastKeyPress = Date() }
-        }, context)
-        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
-        IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-        keyManager = manager
-    }
-
-    /// Builds the dynamic map: for every slot, the colour of the screen area
-    /// above that key. Slot / 6 is the key column, slot % 6 its row; the
-    /// Parvus is a 60% board, so its keys use the first 15 columns.
-    private static func slots(_ mapSize: Int, colour: (Int, Int) -> (Double, Double, Double)) -> [UInt8] {
-        func byte(_ value: Double) -> UInt8 { UInt8((min(max(value, 0), 1) * 255).rounded()) }
-        var bytes = [UInt8](repeating: 0, count: mapSize * 3)
-        for slot in 0..<mapSize {
-            let column = min(slot / 6, ScreenColor.columns - 1)
-            // Six map rows onto the five screen rows.
-            let row = min(Int((Double(slot % 6) * Double(ScreenColor.rows - 1) / 5).rounded()), ScreenColor.rows - 1)
-            let (r, g, b) = colour(column, row)
-            bytes[slot * 3] = byte(r)
-            bytes[slot * 3 + 1] = byte(g)
-            bytes[slot * 3 + 2] = byte(b)
-        }
-        return bytes
-    }
-
-    /// Five seconds of a fixed pattern to check the key map: left half red,
-    /// right half blue, top row white.
-    func runZoneTest() {
-        guard let keyboard, keyboard.supportsLive else { return }
-        testTask?.cancel()
-        testUntil = Date().addingTimeInterval(5)
-        screenSent = nil
-        let slots = Self.slots(keyboard.mapSize) { column, row in
-            if row == 0 { return (1, 1, 1) }
-            return column < ScreenColor.columns / 2 ? (1, 0, 0) : (0, 0.3, 1)
-        }
-        Log.write("zone test: map size \(keyboard.mapSize)")
-        testTask = Task { [weak self] in
-            // The keyboard drops live colours when they stop coming, so repeat.
-            for _ in 0..<25 {
-                guard !Task.isCancelled else { return }
-                await keyboard.showLive(slots)
-                try? await Task.sleep(for: .milliseconds(200))
-            }
-            guard let self, !Task.isCancelled else { return }
-            self.testUntil = nil
-            if self.screenTask == nil { self.pushEffective() }
-        }
     }
 
     private func save() {
@@ -481,7 +321,6 @@ final class KeyboardModel: ObservableObject {
     private func sleep() {
         guard offWhileAsleep, !asleep else { return }
         asleep = true
-        updateScreenSync()
         pushEffective()
     }
 
@@ -490,7 +329,6 @@ final class KeyboardModel: ObservableObject {
         asleep = false
         checkNight()
         pushEffective()
-        updateScreenSync()
     }
 }
 

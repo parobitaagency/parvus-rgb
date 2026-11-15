@@ -103,20 +103,34 @@ struct ContentView: View {
                 ColorPanel(red: $model.lighting.red, green: $model.lighting.green, blue: $model.lighting.blue)
                     .disabled(model.lighting.random)
                     .opacity(model.lighting.random ? 0.4 : 1)
-                HStack {
-                    ForEach(Self.swatches, id: \.self) { hex in
-                        Button {
-                            model.lighting.random = false
-                            model.lighting.red = UInt8((hex >> 16) & 0xFF)
-                            model.lighting.green = UInt8((hex >> 8) & 0xFF)
-                            model.lighting.blue = UInt8(hex & 0xFF)
-                        } label: {
-                            Circle()
-                                .fill(Color(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255, blue: Double(hex & 0xFF) / 255))
-                                .frame(width: 22, height: 22)
-                                .overlay(Circle().strokeBorder(.primary.opacity(0.15)))
+                LabeledContent("Hazır renkler") {
+                    HStack(spacing: 8) {
+                        ForEach(Self.swatches, id: \.self) { hex in
+                            swatch(hex, selected: model.currentHex == hex) { model.useColour(hex) }
                         }
-                        .buttonStyle(.plain)
+                    }
+                }
+                LabeledContent {
+                    HStack(spacing: 8) {
+                        ForEach(model.customColours, id: \.self) { hex in
+                            swatch(hex, selected: model.currentHex == hex) { model.useColour(hex) }
+                                .contextMenu {
+                                    Button("Sil", role: .destructive) { model.deleteColour(hex) }
+                                }
+                                .help(String(format: "#%06X · sağ tık: sil", hex))
+                        }
+                        Button {
+                            model.saveCurrentColour()
+                        } label: {
+                            Label("Bu rengi kaydet", systemImage: "plus.circle.fill")
+                        }
+                        .disabled(model.lighting.random || model.customColours.contains(model.currentHex))
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Renklerim")
+                        Text("R, G, B kutularına değer gir ya da renk alanından seç, sonra kaydet. Silmek için sağ tıkla.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -153,27 +167,6 @@ struct ContentView: View {
                         Text("Apple Music ya da Spotify'da şarkı değişince klavye albüm kapağının rengini alır.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                }
-                if KeyboardModel.liveColoursEnabled {
-                Toggle(isOn: $model.followsScreen) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Ekranla senkron")
-                        Text(screenCaption)
-                            .font(.caption).foregroundStyle(model.screenError == nil ? Color.secondary : Color.orange)
-                    }
-                }
-                .disabled(!model.supportsLive)
-                if model.supportsLive {
-                    LabeledContent {
-                        Button("Bölge testi") { model.runZoneTest() }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Tuş haritası")
-                            Text("5 saniye boyunca sol yarı kırmızı, sağ yarı mavi, üst sıra beyaz olmalı.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
                 }
                 Toggle("Mac uyurken ışıkları kapat", isOn: $model.offWhileAsleep)
                 Toggle(isOn: $model.nightMode) {
@@ -217,10 +210,15 @@ struct ContentView: View {
         .formStyle(.grouped)
     }
 
-    private var screenCaption: String {
-        if let error = model.screenError { return error }
-        if !model.supportsLive { return "Bu klavyenin yazılımı canlı renk desteklemiyor (EVision v1)." }
-        return "Her tuş, monitörde kendi hizasındaki bölgenin rengini canlı olarak alır. En parlak sonuç için klavye parlaklığını en yükseğe al. İlk açılışta Ekran Kaydı izni ister."
+    private func swatch(_ hex: Int, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Circle()
+                .fill(Color(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255, blue: Double(hex & 0xFF) / 255))
+                .frame(width: 22, height: 22)
+                .overlay(Circle().strokeBorder(.primary.opacity(0.15)))
+                .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: selected ? 2 : 0).padding(-3))
+        }
+        .buttonStyle(.plain)
     }
 
     private func savePreset() {
