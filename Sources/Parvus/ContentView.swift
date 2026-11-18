@@ -60,7 +60,7 @@ struct ContentView: View {
     private var permissionBanner: some View {
         HStack {
             Image(systemName: "lock.shield").foregroundStyle(.orange)
-            Text("Klavyenin ışıklarına erişmek için Sistem Ayarları > Gizlilik ve Güvenlik > Giriş İzleme'de Parvus'u aç, sonra uygulamayı yeniden başlat.")
+            Text("Klavyenin ışıklarına erişmek için Sistem Ayarları > Gizlilik ve Güvenlik > Giriş İzleme'de Parvus'u aç. Açık görünüyorsa listeden – ile sil, sonra uygulamayı yeniden başlatıp izni tekrar ver (her yeni sürümde gerekebilir).")
                 .font(.callout)
             Spacer()
             Button("Ayarları Aç") { model.retryPermission() }

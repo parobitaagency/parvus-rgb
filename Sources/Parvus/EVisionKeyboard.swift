@@ -70,6 +70,9 @@ final class EVisionKeyboard {
     private(set) var version: EVision.Version = .v1
     /// v2: number of LED slots in the dynamic colour map.
     private(set) var mapSize = 0
+    /// macOS refused a write: Input Monitoring is not granted to this build
+    /// (each unsigned build counts as a new app, so the old grant no longer applies).
+    private(set) var permissionDenied = false
 
     private let inputBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: EVision.packetSize)
     private var waiting: (command: UInt8, continuation: CheckedContinuation<[UInt8]?, Never>)?
@@ -117,6 +120,7 @@ final class EVisionKeyboard {
             IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, CFIndex(EVision.reportID), buffer.baseAddress!, buffer.count)
         }
         if result != kIOReturnSuccess {
+            if result == kIOReturnNotPermitted { permissionDenied = true }
             Log.write("write cmd \(String(format: "%02x", command)) failed: \(String(format: "0x%08x", result))")
             return nil
         }
@@ -149,6 +153,10 @@ final class EVisionKeyboard {
     /// nothing back into the keyboard and writes no settings.
     func detect() async {
         let answer = await query(EVision.Command.readCapabilities.rawValue, size: 7, log: true)
+        if permissionDenied {
+            Log.write("writes not permitted: Input Monitoring must be granted again")
+            return
+        }
         if let data = Self.payload(answer), data.count >= 7, data[0] == 0xAA, data[1] == 0x55 {
             version = .v2
             mapSize = Int(data[5])

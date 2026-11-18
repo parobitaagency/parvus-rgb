@@ -281,6 +281,11 @@ final class KeyboardModel: ObservableObject {
         status = "Bağlanıyor…"
         Task {
             await keyboard.detect()
+            if keyboard.permissionDenied {
+                status = "İzin gerekli: Giriş İzleme'de Parvus'u silip yeniden ekle."
+                needsPermission = true
+                return
+            }
             connected = true
             versionName = keyboard.version.rawValue
             status = "Rampage Parvus bağlı"
