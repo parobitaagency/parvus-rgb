@@ -168,6 +168,25 @@ struct ContentView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                Toggle(isOn: $model.followsScreen) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Ekranla senkron (deneysel)")
+                        Text(screenCaption)
+                            .font(.caption).foregroundStyle(model.screenError == nil ? Color.secondary : Color.orange)
+                    }
+                }
+                .disabled(!model.supportsLive)
+                if model.supportsLive {
+                    LabeledContent {
+                        Button("Bölge testi") { model.runZoneTest() }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Tuş haritası")
+                            Text("5 saniye boyunca sol yarı kırmızı, sağ yarı mavi, üst sıra beyaz olmalı.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 Toggle("Mac uyurken ışıkları kapat", isOn: $model.offWhileAsleep)
                 Toggle(isOn: $model.nightMode) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -208,6 +227,12 @@ struct ContentView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private var screenCaption: String {
+        if let error = model.screenError { return error }
+        if !model.supportsLive { return "Bu klavyenin yazılımı canlı renk desteklemiyor (EVision v1)." }
+        return "Her tuş, monitörde kendi hizasındaki bölgenin rengini alır. Klavye güç sinyali gönderirse senkron kendiliğinden durur."
     }
 
     private func swatch(_ hex: Int, selected: Bool, action: @escaping () -> Void) -> some View {

@@ -56,8 +56,24 @@ final class KeyboardModel: ObservableObject {
         didSet {
             UserDefaults.standard.set(followsMusic, forKey: "followsMusic")
             followsMusic ? music.start() : music.stop()
+            if followsMusic { followsScreen = false }
         }
     }
+    /// The keyboard follows the colours on the monitor, live (v2 firmware).
+    @Published var followsScreen: Bool {
+        didSet {
+            guard followsScreen != oldValue else { return }
+            UserDefaults.standard.set(followsScreen, forKey: "followsScreen")
+            if followsScreen {
+                followsMusic = false
+                screenError = nil
+            }
+            updateScreenSync()
+        }
+    }
+    @Published private(set) var screenError: String?
+    /// Live colours need EVision v2; v1 keyboards would have to save every frame.
+    var supportsLive: Bool { keyboard?.supportsLive ?? false }
     /// Lights off between `nightStart` and `nightEnd` (minutes after midnight).
     @Published var nightMode: Bool { didSet { UserDefaults.standard.set(nightMode, forKey: "nightMode"); checkNight() } }
     @Published var nightStart: Int { didSet { UserDefaults.standard.set(nightStart, forKey: "nightStart"); checkNight() } }
@@ -73,6 +89,19 @@ final class KeyboardModel: ObservableObject {
     }
 
     private let music = MusicColor()
+    private let screen = ScreenColor()
+    private var screenTarget: [Double]?
+    private var screenShown: [Double]?
+    private var screenSent: [UInt8]?
+    private var screenSentAt = Date.distantPast
+    private var screenFailures = 0
+    /// Last time a key was pressed on the Parvus; live colours pause while typing.
+    private var lastKeyPress = Date.distantPast
+    private var keyManager: IOHIDManager?
+    /// Until this time the keys show the zone test pattern.
+    private var testUntil: Date?
+    private var testTask: Task<Void, Never>?
+    private var screenTask: Task<Void, Never>?
     private var hotkey: Hotkey?
     private var nightTimer: Timer?
 
@@ -98,10 +127,12 @@ final class KeyboardModel: ObservableObject {
 
     private init() {
         let defaults = UserDefaults.standard
-        defaults.register(defaults: ["offWhileAsleep": true, "followsMusic": false, "nightMode": false,
+        defaults.register(defaults: ["offWhileAsleep": true, "followsMusic": false, "followsScreen": false, "nightMode": false,
                                      "nightStart": 23 * 60, "nightEnd": 7 * 60])
         offWhileAsleep = defaults.bool(forKey: "offWhileAsleep")
         followsMusic = defaults.bool(forKey: "followsMusic")
+        // Experimental: never starts by itself at launch.
+        followsScreen = false
         nightMode = defaults.bool(forKey: "nightMode")
         nightStart = defaults.integer(forKey: "nightStart")
         nightEnd = defaults.integer(forKey: "nightEnd")
@@ -150,6 +181,7 @@ final class KeyboardModel: ObservableObject {
         Log.write("HID manager open: \(String(format: "0x%08x", result))")
         self.manager = manager
         observeSleep()
+        watchKeys()
         music.onColor = { [weak self] red, green, blue in
             guard let self, self.followsMusic else { return }
             self.lighting.random = false
@@ -158,6 +190,12 @@ final class KeyboardModel: ObservableObject {
             self.lighting.blue = blue
         }
         if followsMusic { music.start() }
+        screen.onColors = { [weak self] grid in self?.screenTarget = grid }
+        screen.onError = { [weak self] message in
+            guard let self else { return }
+            self.screenError = message
+            self.followsScreen = false
+        }
         hotkey = Hotkey { [weak self] in self?.toggle() }
         let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.checkNight() }
@@ -184,6 +222,7 @@ final class KeyboardModel: ObservableObject {
         isNight = night
         Log.write(night ? "night mode: lights off" : "night mode: lights back")
         pushEffective()
+        updateScreenSync()
     }
 
     // MARK: Presets
@@ -251,6 +290,8 @@ final class KeyboardModel: ObservableObject {
                 loading = false
                 save()
             }
+            objectWillChange.send()
+            updateScreenSync()
         }
     }
 
@@ -261,6 +302,7 @@ final class KeyboardModel: ObservableObject {
         connected = false
         versionName = ""
         status = "Klavye takılı değil"
+        updateScreenSync()
     }
 
     // MARK: Applying
@@ -288,6 +330,195 @@ final class KeyboardModel: ObservableObject {
         guard let keyboard else { return }
         let shown = effective
         Task { await keyboard.apply(shown) }
+    }
+
+    // MARK: Screen sync
+
+    /// Runs the capture and the send loop only while they can do something:
+    /// sync on, a v2 keyboard attached, the Mac awake and not night.
+    private func updateScreenSync() {
+        let active = followsScreen && supportsLive && !asleep && !isNight
+        if active {
+            screen.start()
+            guard screenTask == nil else { return }
+            screenShown = nil
+            screenSent = nil
+            screenFailures = 0
+            screenTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    await self?.sendScreenFrame()
+                    // 10 updates a second at most: faster floods the keyboard,
+                    // which then misreads keys.
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+            }
+        } else {
+            screen.stop()
+            guard let task = screenTask else { return }
+            task.cancel()
+            screenTask = nil
+            screenTarget = nil
+            screenShown = nil
+            screenSent = nil
+            // Leave live mode properly, then back to the saved effect.
+            if let keyboard {
+                let shown = effective
+                Task {
+                    await keyboard.endLive()
+                    await keyboard.apply(shown)
+                }
+            }
+        }
+    }
+
+    /// Eases the keys toward the latest screen colours, so cuts in a video
+    /// do not flicker, and sends only when something visibly changed.
+    private func sendScreenFrame() async {
+        guard let keyboard, let target = screenTarget else { return }
+        if let testUntil, testUntil > Date() { return }
+        // Lights switched off (button or ⌃⌥⌘L): leave them off.
+        guard lighting.brightness > 0 else {
+            screenShown = nil
+            screenSent = nil
+            return
+        }
+        var shown = screenShown ?? target
+        if shown.count != target.count { shown = target }
+        for index in shown.indices { shown[index] += (target[index] - shown[index]) * 0.35 }
+        screenShown = shown
+        let slots = Self.slots(keyboard.mapSize) { column, row in
+            let cell = (row * ScreenColor.columns + column) * 3
+            return (shown[cell], shown[cell + 1], shown[cell + 2])
+        }
+        // Hold off while typing, so colour packets never cross key presses.
+        guard Date().timeIntervalSince(lastKeyPress) > 0.6 else { return }
+        let ok: Bool
+        if slots == screenSent {
+            // Unchanged: keep the live colours up the way OpenRGB does, with
+            // one zero byte in the blank slot every 200 ms.
+            guard Date().timeIntervalSince(screenSentAt) > 0.2 else { return }
+            ok = await keyboard.keepLiveAlive()
+        } else {
+            ok = await keyboard.sendLive(slots, changedSince: screenSent)
+        }
+        if ok {
+            screenSent = slots
+            screenSentAt = Date()
+            screenFailures = 0
+        } else {
+            screenSent = nil
+            screenFailures += 1
+            Log.write("screen sync: keyboard did not answer (\(screenFailures))")
+            if screenFailures >= 3 {
+                screenError = "Klavye yanıt vermedi, senkron durduruldu. Klavyeyi çıkarıp tak."
+                followsScreen = false
+                return
+            }
+            try? await Task.sleep(for: .seconds(2))
+        }
+    }
+
+    /// Watches the Parvus's own key, system and consumer reports (Input
+    /// Monitoring is already granted for the lighting interface): key
+    /// presses pause the live colours, and a power or sleep signal while
+    /// they run stops screen sync on the spot.
+    private func watchKeys() {
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        let usages: [(Int, Int)] = [
+            (kHIDPage_GenericDesktop, kHIDUsage_GD_Keyboard),
+            (kHIDPage_GenericDesktop, kHIDUsage_GD_SystemControl),
+            (kHIDPage_Consumer, kHIDUsage_Csmr_ConsumerControl),
+        ]
+        let matching: [[String: Any]] = usages.map { page, usage in
+            [kIOHIDVendorIDKey: EVision.vendorID, kIOHIDProductIDKey: EVision.productID,
+             kIOHIDDeviceUsagePageKey: page, kIOHIDDeviceUsageKey: usage]
+        }
+        IOHIDManagerSetDeviceMatchingMultiple(manager, matching as CFArray)
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDManagerRegisterInputValueCallback(manager, { context, _, _, value in
+            guard let context else { return }
+            let element = IOHIDValueGetElement(value)
+            let page = Int(IOHIDElementGetUsagePage(element))
+            let usage = Int(IOHIDElementGetUsage(element))
+            let pressed = IOHIDValueGetIntegerValue(value) != 0
+            let model = Unmanaged<KeyboardModel>.fromOpaque(context).takeUnretainedValue()
+            MainActor.assumeIsolated { model.keyEvent(page: page, usage: usage, pressed: pressed) }
+        }, context)
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+        IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        keyManager = manager
+    }
+
+    private func keyEvent(page: Int, usage: Int, pressed: Bool) {
+        if page == kHIDPage_KeyboardOrKeypad { lastKeyPress = Date() }
+        let power = (page == kHIDPage_GenericDesktop && [kHIDUsage_GD_SystemPowerDown, kHIDUsage_GD_SystemSleep].contains(usage))
+            || (page == kHIDPage_Consumer && [kHIDUsage_Csmr_Power, kHIDUsage_Csmr_Sleep, kHIDUsage_Csmr_SleepMode].contains(usage))
+            || (page == kHIDPage_KeyboardOrKeypad && usage == kHIDUsage_KeyboardPower)
+        guard power, pressed, screenTask != nil || testUntil != nil else { return }
+        Log.write("power signal from the keyboard (page \(page), usage \(usage)) while live colours ran: screen sync stopped")
+        testTask?.cancel()
+        testUntil = nil
+        screenError = "Klavye güç sinyali gönderdi, senkron güvenlik için durduruldu. Klavyeyi çıkarıp tak."
+        followsScreen = false
+        if let keyboard { Task { await keyboard.endLive() } }
+    }
+
+    /// The slots of the dynamic map that belong to a key (OpenRGB's EVision v2
+    /// map). Every other slot stays 0, as OpenRGB leaves it; slot 6 is the
+    /// blank one the keyboard is kept alive through. Earlier versions
+    /// coloured every slot, and the Parvus then sent System Power.
+    private static let keySlots: Set<Int> = [
+        0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 27, 28,
+        30, 31, 32, 33, 34, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 48, 49, 50, 51, 52, 54, 55, 56, 57, 58,
+        60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86,
+        89, 90, 91, 92, 94, 95, 96, 97, 98, 101, 103, 104, 105, 106, 109, 110, 111, 112, 113, 115, 116, 117,
+        118, 119, 121, 122, 124,
+    ]
+
+    /// Builds the dynamic map: for every slot, the colour of the screen area
+    /// above that key. Slot / 6 is the key column, slot % 6 its row; the
+    /// Parvus is a 60% board, so its keys use the first 15 columns.
+    private static func slots(_ mapSize: Int, colour: (Int, Int) -> (Double, Double, Double)) -> [UInt8] {
+        func byte(_ value: Double) -> UInt8 { UInt8((min(max(value, 0), 1) * 255).rounded()) }
+        var bytes = [UInt8](repeating: 0, count: mapSize * 3)
+        for slot in 0..<mapSize where keySlots.contains(slot) {
+            let column = min(slot / 6, ScreenColor.columns - 1)
+            // Six map rows onto the five screen rows.
+            let row = min(Int((Double(slot % 6) * Double(ScreenColor.rows - 1) / 5).rounded()), ScreenColor.rows - 1)
+            let (r, g, b) = colour(column, row)
+            bytes[slot * 3] = byte(r)
+            bytes[slot * 3 + 1] = byte(g)
+            bytes[slot * 3 + 2] = byte(b)
+        }
+        return bytes
+    }
+
+    /// Five seconds of a fixed pattern to check the key map: left half red,
+    /// right half blue, top row white.
+    func runZoneTest() {
+        guard let keyboard, keyboard.supportsLive else { return }
+        testTask?.cancel()
+        testUntil = Date().addingTimeInterval(5)
+        screenSent = nil
+        let slots = Self.slots(keyboard.mapSize) { column, row in
+            if row == 0 { return (1, 1, 1) }
+            return column < ScreenColor.columns / 2 ? (1, 0, 0) : (0, 0.3, 1)
+        }
+        Log.write("zone test: map size \(keyboard.mapSize)")
+        testTask = Task { [weak self] in
+            // The keyboard drops live colours when they stop coming, so repeat.
+            for _ in 0..<25 {
+                guard !Task.isCancelled else { return }
+                await keyboard.showLive(slots)
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.testUntil = nil
+            if self.screenTask == nil {
+                await keyboard.endLive()
+                self.pushEffective()
+            }
+        }
     }
 
     private func save() {
@@ -321,6 +552,7 @@ final class KeyboardModel: ObservableObject {
     private func sleep() {
         guard offWhileAsleep, !asleep else { return }
         asleep = true
+        updateScreenSync()
         pushEffective()
     }
 
@@ -329,6 +561,7 @@ final class KeyboardModel: ObservableObject {
         asleep = false
         checkNight()
         pushEffective()
+        updateScreenSync()
     }
 }
 
