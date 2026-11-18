@@ -429,10 +429,11 @@ final class KeyboardModel: ObservableObject {
     /// they run stops screen sync on the spot.
     private func watchKeys() {
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        // Only the key interface: also opening the system and consumer
+        // control interfaces made macOS refuse every lighting write
+        // (0xe00002e2), though Input Monitoring was granted.
         let usages: [(Int, Int)] = [
             (kHIDPage_GenericDesktop, kHIDUsage_GD_Keyboard),
-            (kHIDPage_GenericDesktop, kHIDUsage_GD_SystemControl),
-            (kHIDPage_Consumer, kHIDUsage_Csmr_ConsumerControl),
         ]
         let matching: [[String: Any]] = usages.map { page, usage in
             [kIOHIDVendorIDKey: EVision.vendorID, kIOHIDProductIDKey: EVision.productID,
