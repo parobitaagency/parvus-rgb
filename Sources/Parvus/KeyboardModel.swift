@@ -95,9 +95,6 @@ final class KeyboardModel: ObservableObject {
     private var screenSent: [UInt8]?
     private var screenSentAt = Date.distantPast
     private var screenFailures = 0
-    /// Last time a key was pressed on the Parvus; live colours pause while typing.
-    private var lastKeyPress = Date.distantPast
-    private var keyManager: IOHIDManager?
     /// Until this time the keys show the zone test pattern.
     private var testUntil: Date?
     private var testTask: Task<Void, Never>?
@@ -181,7 +178,6 @@ final class KeyboardModel: ObservableObject {
         Log.write("HID manager open: \(String(format: "0x%08x", result))")
         self.manager = manager
         observeSleep()
-        watchKeys()
         music.onColor = { [weak self] red, green, blue in
             guard let self, self.followsMusic else { return }
             self.lighting.random = false
@@ -395,13 +391,11 @@ final class KeyboardModel: ObservableObject {
             let cell = (row * ScreenColor.columns + column) * 3
             return (shown[cell], shown[cell + 1], shown[cell + 2])
         }
-        // Hold off while typing, so colour packets never cross key presses.
-        guard Date().timeIntervalSince(lastKeyPress) > 0.6 else { return }
         let ok: Bool
         if slots == screenSent {
             // Unchanged: keep the live colours up the way OpenRGB does, with
             // one zero byte in the blank slot every 200 ms.
-            guard Date().timeIntervalSince(screenSentAt) > 0.2 else { return }
+            guard Date().timeIntervalSince(screenSentAt) > 0.15 else { return }
             ok = await keyboard.keepLiveAlive()
         } else {
             ok = await keyboard.sendLive(slots, changedSince: screenSent)
@@ -414,59 +408,14 @@ final class KeyboardModel: ObservableObject {
             screenSent = nil
             screenFailures += 1
             Log.write("screen sync: keyboard did not answer (\(screenFailures))")
-            if screenFailures >= 3 {
+            if screenFailures >= 10 {
                 screenError = "Klavye yanıt vermedi, senkron durduruldu. Klavyeyi çıkarıp tak."
                 followsScreen = false
                 return
             }
-            try? await Task.sleep(for: .seconds(2))
+            // A missed answer now and then is normal; resend right away so the
+            // keyboard does not time out and fall back to its own colour.
         }
-    }
-
-    /// Watches the Parvus's own key, system and consumer reports (Input
-    /// Monitoring is already granted for the lighting interface): key
-    /// presses pause the live colours, and a power or sleep signal while
-    /// they run stops screen sync on the spot.
-    private func watchKeys() {
-        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        // Only the key interface: also opening the system and consumer
-        // control interfaces made macOS refuse every lighting write
-        // (0xe00002e2), though Input Monitoring was granted.
-        let usages: [(Int, Int)] = [
-            (kHIDPage_GenericDesktop, kHIDUsage_GD_Keyboard),
-        ]
-        let matching: [[String: Any]] = usages.map { page, usage in
-            [kIOHIDVendorIDKey: EVision.vendorID, kIOHIDProductIDKey: EVision.productID,
-             kIOHIDDeviceUsagePageKey: page, kIOHIDDeviceUsageKey: usage]
-        }
-        IOHIDManagerSetDeviceMatchingMultiple(manager, matching as CFArray)
-        let context = Unmanaged.passUnretained(self).toOpaque()
-        IOHIDManagerRegisterInputValueCallback(manager, { context, _, _, value in
-            guard let context else { return }
-            let element = IOHIDValueGetElement(value)
-            let page = Int(IOHIDElementGetUsagePage(element))
-            let usage = Int(IOHIDElementGetUsage(element))
-            let pressed = IOHIDValueGetIntegerValue(value) != 0
-            let model = Unmanaged<KeyboardModel>.fromOpaque(context).takeUnretainedValue()
-            MainActor.assumeIsolated { model.keyEvent(page: page, usage: usage, pressed: pressed) }
-        }, context)
-        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
-        IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-        keyManager = manager
-    }
-
-    private func keyEvent(page: Int, usage: Int, pressed: Bool) {
-        if page == kHIDPage_KeyboardOrKeypad { lastKeyPress = Date() }
-        let power = (page == kHIDPage_GenericDesktop && [kHIDUsage_GD_SystemPowerDown, kHIDUsage_GD_SystemSleep].contains(usage))
-            || (page == kHIDPage_Consumer && [kHIDUsage_Csmr_Power, kHIDUsage_Csmr_Sleep, kHIDUsage_Csmr_SleepMode].contains(usage))
-            || (page == kHIDPage_KeyboardOrKeypad && usage == kHIDUsage_KeyboardPower)
-        guard power, pressed, screenTask != nil || testUntil != nil else { return }
-        Log.write("power signal from the keyboard (page \(page), usage \(usage)) while live colours ran: screen sync stopped")
-        testTask?.cancel()
-        testUntil = nil
-        screenError = "Klavye güç sinyali gönderdi, senkron güvenlik için durduruldu. Klavyeyi çıkarıp tak."
-        followsScreen = false
-        if let keyboard { Task { await keyboard.endLive() } }
     }
 
     /// The slots of the dynamic map that belong to a key (OpenRGB's EVision v2

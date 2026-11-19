@@ -232,7 +232,7 @@ struct ContentView: View {
     private var screenCaption: String {
         if let error = model.screenError { return error }
         if !model.supportsLive { return "Bu klavyenin yazılımı canlı renk desteklemiyor (EVision v1)." }
-        return "Her tuş, monitörde kendi hizasındaki bölgenin rengini alır. Klavye güç sinyali gönderirse senkron kendiliğinden durur."
+        return "Her tuş, monitörde kendi hizasındaki bölgenin rengini alır."
     }
 
     private func swatch(_ hex: Int, selected: Bool, action: @escaping () -> Void) -> some View {
